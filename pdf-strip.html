@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pdf-strip -- browser</title>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
+<style>
+  /* -- Theme tokens ----------------------------------------------------------- */
+
+  /* dark (default) -- deep slate with cyan accent */
+  :root,
+  [data-theme="dark"]{
+    --bg:         #0d1117;
+    --panel:      #12161c;
+    --panel-hi:   #161d27;
+    --line:       #1e3a4a;
+    --text:       #ccd6e0;
+    --dim:        #6b8394;
+    --accent:     #22d3ee;
+    --accent-dim: #0a3040;
+    --btn-hover-bg:   #0e2a35;
+    --btn-hover-text: #22d3ee;
+    --warn:       #e5a94f;
+    --bad:        #e5734f;
+    --shadow:     0 2px 8px rgba(0,0,0,0.45);
+    --mono: 'SF Mono','JetBrains Mono',Consolas,monospace;
+  }
+
+  /* light -- cool white with cyan-600 accent */
+  [data-theme="light"]{
+    --bg:         #f0f7fa;
+    --panel:      #ffffff;
+    --panel-hi:   #e8f4f8;
+    --line:       #b0cdd8;
+    --text:       #0f2430;
+    --dim:        #4a6878;
+    --accent:     #0891b2;
+    --accent-dim: #cceef8;
+    --btn-hover-bg:   #e0f5fb;
+    --btn-hover-text: #0891b2;
+    --warn:       #b45309;
+    --bad:        #dc2626;
+    --shadow:     0 2px 8px rgba(0,0,0,0.08);
+  }
+
+  /* -- Reset & base ----------------------------------------------------------- */
+  *, *::before, *::after{ box-sizing:border-box; }
+
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--mono);
+    margin:0;
+    padding:2rem 0 4rem;
+    min-height:100vh;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    transition:background 0.2s, color 0.2s;
+  }
+
+  /* -- Layout: 70% width, full-width on small screens ----------------------- */
+  .wrap{
+    width:70%;
+    max-width:900px;
+    min-width:0;
+  }
+  @media (max-width: 900px){ .wrap{ width:88%; } }
+  @media (max-width: 600px){ .wrap{ width:96%; } }
+
+  /* -- Header row ------------------------------------------------------------ */
+  .header-row{
+    display:flex; align-items:center; justify-content:space-between;
+    margin-bottom:0.25rem;
+  }
+  .header-row h1{ margin:0; }
+
+  h1{
+    font-size:0.95rem;
+    letter-spacing:0.06em;
+    color:var(--dim);
+    text-transform:uppercase;
+    margin:0 0 0.25rem;
+    font-weight:700;
+  }
+  .sub{
+    font-size:0.8rem;
+    color:var(--dim);
+    margin-top:1.5rem;
+    margin-bottom:1.5rem;
+    line-height:1.6;
+  }
+  .sub code{ color:var(--accent); }
+
+  /* -- Theme picker ---------------------------------------------------------- */
+  #theme-picker{
+    display:flex; align-items:center; gap:0.35rem;
+  }
+  .theme-dot{
+    width:20px; height:20px; border-radius:50%;
+    border:2px solid transparent;
+    cursor:pointer;
+    transition:border-color 0.15s, transform 0.15s;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .theme-dot:hover{ transform:scale(1.15); }
+  .theme-dot.active{ border-color:var(--text); }
+  .theme-dot[data-t="dark"]  { background:#0d1117; box-shadow:0 0 0 1px #22d3ee; }
+  .theme-dot[data-t="light"] { background:#f0f7fa; box-shadow:0 0 0 1px #0891b2; }
+
+  /* -- Scrollbar --------------------------------------------------------------- */
+  ::-webkit-scrollbar{ width:5px; height:5px; }
+  ::-webkit-scrollbar-track{ background:transparent; }
+  ::-webkit-scrollbar-thumb{ background:var(--line); border-radius:4px; }
+  ::-webkit-scrollbar-thumb:hover{ background:var(--dim); }
+
+  /* -- Keyboard shortcut hints ----------------------------------------------- */
+  kbd{
+    font-family:var(--mono); font-size:0.7em;
+    background:var(--panel-hi); border:1px solid var(--line);
+    border-radius:3px; padding:0.1em 0.35em;
+    color:var(--dim);
+  }
+
+  /* -- Status indicator ------------------------------------------------------- */
+  #status{
+    font-size:0.78rem;
+    color:var(--dim);
+    margin-bottom:1.25rem;
+    min-height:1.2em;
+    display:flex;
+    align-items:center;
+    gap:0.5rem;
+  }
+  #status.ready{ color:var(--accent); }
+  .dot{ width:7px; height:7px; border-radius:50%; background:var(--dim); flex-shrink:0; }
+  #status.ready .dot{ background:var(--accent); box-shadow:0 0 8px var(--accent); }
+  #status.loading .dot{ animation:pulse 1.1s ease-in-out infinite; }
+  @keyframes pulse{ 0%,100%{opacity:0.3;} 50%{opacity:1;} }
+
+  .drop{
+    border:1px dashed var(--line);
+    border-radius:6px;
+    padding:2.5rem 1.5rem;
+    text-align:center;
+    cursor:pointer;
+    transition:border-color 0.15s, background 0.15s;
+    background:var(--panel);
+  }
+  .drop:hover, .drop.drag{
+    border-color:var(--accent);
+    background:var(--panel-hi);
+  }
+  .drop .icon{ font-size:1.4rem; margin-bottom:0.5rem; opacity:0.6; }
+  .drop .label{ font-size:0.85rem; color:var(--text); }
+  .drop .hint{ font-size:0.72rem; color:var(--dim); margin-top:0.35rem; }
+  input[type=file]{ display:none; }
+
+  .file-row{
+    display:none;
+    justify-content:space-between;
+    align-items:center;
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:6px;
+    padding:0.85rem 1rem;
+    margin-top:1rem;
+    font-size:0.82rem;
+  }
+  .file-row.show{ display:flex; }
+  .file-row .name{ color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .file-row .size{ color:var(--dim); flex-shrink:0; margin-left:1rem; }
+
+  .actions{
+    display:none;
+    gap:0.6rem;
+    margin-top:1rem;
+  }
+  .actions.show{ display:flex; }
+
+  button{
+    font-family:var(--mono);
+    font-size:0.8rem;
+    padding:0.6rem 1rem;
+    border-radius:5px;
+    border:1px solid var(--line);
+    background:var(--panel);
+    color:var(--text);
+    cursor:pointer;
+    transition:border-color 0.15s, background 0.15s, color 0.15s;
+  }
+  button:hover:not(:disabled){
+    border-color:var(--accent);
+    background:var(--btn-hover-bg);
+    color:var(--btn-hover-text);
+  }
+  button:disabled{ opacity:0.4; cursor:default; }
+  button.primary{
+    background:var(--accent);
+    border-color:var(--accent);
+    color:#0d1117;
+    font-weight:700;
+  }
+  button.primary:hover:not(:disabled){
+    filter:brightness(1.1);
+    opacity:1;
+  }
+
+  .result{
+    display:none;
+    margin-top:1.5rem;
+    border:1px solid var(--line);
+    border-radius:6px;
+    overflow:hidden;
+    box-shadow:var(--shadow);
+  }
+  .result.show{ display:block; }
+  .result-head{
+    padding:0.7rem 1rem;
+    font-size:0.75rem;
+    text-transform:uppercase;
+    letter-spacing:0.04em;
+    color:var(--dim);
+    border-bottom:1px solid var(--line);
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    background:var(--panel-hi);
+  }
+  .result-head span.tag{ color:var(--accent); font-weight:700; }
+  .result-head span.tag.dirty{ color:var(--warn); }
+  .meta-list{
+    padding:0.85rem 1rem;
+    font-size:0.76rem;
+    line-height:1.6;
+    max-height:220px;
+    overflow-y:auto;
+  }
+  .meta-list .k{ color:var(--dim); }
+  .meta-list .v{ color:var(--text); word-break:break-all; }
+  .meta-list .clean{ color:var(--accent); }
+  .meta-row{ display:flex; gap:0.5rem; }
+  .meta-row .k{ flex-shrink:0; min-width:90px; }
+
+  .download-bar{
+    padding:0.85rem 1rem;
+    border-top:1px solid var(--line);
+  }
+  a.dl{
+    display:inline-block;
+    font-size:0.82rem;
+    color:#0d1117;
+    background:var(--accent);
+    padding:0.55rem 1rem;
+    border-radius:5px;
+    text-decoration:none;
+    font-weight:600;
+  }
+  a.dl:hover{ filter:brightness(1.1); }
+
+  footer{
+    margin-top:2.5rem;
+    font-size:0.68rem;
+    color:var(--dim);
+    text-align:center;
+    line-height:1.6;
+  }
+  footer .runs-local{ color:var(--accent); }
+
+  /* -- Mobile FAB ------------------------------------------------------------ */
+  #fab{
+    display:none;
+    position:fixed;
+    bottom:1.25rem;
+    right:1.25rem;
+    width:48px; height:48px;
+    border-radius:50%;
+    background:var(--accent);
+    color:#0d1117;
+    font-size:1.1rem;
+    border:none;
+    cursor:pointer;
+    box-shadow:0 3px 10px rgba(0,0,0,0.35);
+    align-items:center;
+    justify-content:center;
+    transition:filter 0.15s, transform 0.15s;
+    z-index:100;
+  }
+  #fab:hover{ filter:brightness(1.1); transform:scale(1.06); }
+
+  #fab-menu{
+    display:none;
+    position:fixed;
+    bottom:4.5rem;
+    right:1.25rem;
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:8px;
+    box-shadow:var(--shadow);
+    z-index:101;
+    overflow:hidden;
+    min-width:180px;
+  }
+  #fab-menu.open{ display:block; }
+  .fab-item{
+    display:flex;
+    align-items:center;
+    gap:0.6rem;
+    padding:0.7rem 1rem;
+    font-family:var(--mono);
+    font-size:0.78rem;
+    color:var(--text);
+    cursor:pointer;
+    border:none;
+    background:transparent;
+    width:100%;
+    text-align:left;
+    transition:background 0.12s, color 0.12s;
+  }
+  .fab-item:hover{ background:var(--btn-hover-bg); color:var(--btn-hover-text); }
+  .fab-item + .fab-item{ border-top:1px solid var(--line); }
+  .fab-item .fab-label{ flex:1; }
+  .fab-item .fab-key{ font-size:0.68rem; color:var(--dim); }
+
+  @media (max-width: 768px){
+    #fab{ display:flex; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header-row">
+    <h1>pdf-strip</h1>
+    <div id="theme-picker">
+      <div class="theme-dot" data-t="dark"  title="Dark"></div>
+      <div class="theme-dot" data-t="light" title="Light"></div>
+    </div>
+  </div>
+  <div class="sub">
+    <span class="txt-simple">PDF files often carry hidden information you didn't put there -- your name, when you created it, which software you used, and sometimes even your organisation. This tool quietly removes all of that before you share the file. Nothing is uploaded; it all happens in your browser.</span>
+    <span class="txt-tech" hidden>Strip <code>/Info</code> and XMP metadata from a PDF. Runs entirely in your browser via Pyodide + <code>pypdf</code> -- the file never leaves your machine.</span>
+  </div>
+
+  <div id="status" class="loading"><span class="dot"></span><span id="status-text">booting python runtime...</span></div>
+
+  <div class="drop" id="drop">
+    <div class="icon">&#9662;</div>
+    <div class="label">Drop a PDF here, or click to choose</div>
+    <div class="hint">processed locally, nothing uploaded</div>
+  </div>
+  <input type="file" id="file-input" accept="application/pdf">
+
+  <div class="file-row" id="file-row">
+    <span class="name" id="file-name"></span>
+    <span class="size" id="file-size"></span>
+  </div>
+
+  <div class="actions" id="actions">
+    <button id="btn-check">check metadata</button>
+    <button class="primary" id="btn-strip" disabled>strip &amp; download</button>
+  </div>
+
+  <div class="result" id="result">
+    <div class="result-head">
+      <span id="result-title">metadata found</span>
+      <span class="tag" id="result-tag"></span>
+    </div>
+    <div class="meta-list" id="meta-list"></div>
+    <div class="download-bar" id="download-bar" style="display:none;"></div>
+  </div>
+
+  <footer>
+    <span class="runs-local">●</span>
+    <span class="txt-simple">Your PDF never leaves your device. Press <kbd>Ctrl+Shift+S</kbd> to see the nerdy details.</span>
+    <span class="txt-tech" hidden>no network calls after initial load &nbsp;-&nbsp; pikepdf isn't available as a Pyodide wheel, so this uses pypdf (pure-Python) instead -- same result: /Info dict and XMP stream removed &nbsp;-&nbsp; <kbd>Ctrl+Shift+S</kbd> plain language view &nbsp;-&nbsp; <kbd>Esc</kbd> reset</span>
+  </footer>
+</div>
+
+<!-- Mobile FAB -->
+<button id="fab" aria-label="Actions menu">⌨</button>
+<div id="fab-menu">
+  <button class="fab-item" id="fab-toggle-view">
+    <span class="fab-label">toggle tech view</span>
+    <span class="fab-key">⌃⇧S</span>
+  </button>
+  <button class="fab-item" id="fab-reset">
+    <span class="fab-label">reset</span>
+    <span class="fab-key">Esc</span>
+  </button>
+</div>
+
+<script>
+let pyodide = null;
+let currentFile = null;
+let currentBytes = null;
+
+const statusEl = document.getElementById('status');
+const statusText = document.getElementById('status-text');
+const drop = document.getElementById('drop');
+const fileInput = document.getElementById('file-input');
+const fileRow = document.getElementById('file-row');
+const fileName = document.getElementById('file-name');
+const fileSize = document.getElementById('file-size');
+const actions = document.getElementById('actions');
+const btnCheck = document.getElementById('btn-check');
+const btnStrip = document.getElementById('btn-strip');
+const result = document.getElementById('result');
+const resultTitle = document.getElementById('result-title');
+const resultTag = document.getElementById('result-tag');
+const metaList = document.getElementById('meta-list');
+const downloadBar = document.getElementById('download-bar');
+
+function setStatus(msg, ready){
+  statusText.textContent = msg;
+  statusEl.classList.toggle('ready', !!ready);
+  statusEl.classList.toggle('loading', !ready);
+}
+
+function fmtSize(bytes){
+  if(bytes < 1024) return bytes + ' B';
+  if(bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/1024/1024).toFixed(2) + ' MB';
+}
+
+async function boot(){
+  setStatus('booting python runtime...', false);
+  pyodide = await loadPyodide();
+  setStatus('installing pypdf...', false);
+  await pyodide.loadPackage('micropip');
+  const micropip = pyodide.pyimport('micropip');
+  await micropip.install('pypdf');
+
+  await pyodide.runPythonAsync(`
+import io
+from pypdf import PdfReader, PdfWriter
+
+def check_metadata(data: bytes):
+    reader = PdfReader(io.BytesIO(data))
+    found = {}
+    if reader.metadata:
+        for k, v in reader.metadata.items():
+            found[str(k)] = str(v)
+    xmp = reader.xmp_metadata
+    if xmp is not None:
+        try:
+            for k, v in xmp.get_element(about_uri="").attrib.items():
+                found[f"XMP:{k}"] = str(v)
+        except Exception:
+            found["XMP"] = "present (raw stream detected)"
+    return found
+
+def strip_metadata(data: bytes) -> bytes:
+    reader = PdfReader(io.BytesIO(data))
+    writer = PdfWriter()
+    writer.append(reader)
+    writer.add_metadata({})
+    if "/Root" in writer._root_object and "/Metadata" in writer._root_object:
+        del writer._root_object["/Metadata"]
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+`);
+
+  setStatus('ready', true);
+  actions.classList.add('show');
+  btnCheck.disabled = false;
+}
+
+function resetResult(){
+  result.classList.remove('show');
+  metaList.innerHTML = '';
+  downloadBar.style.display = 'none';
+  downloadBar.innerHTML = '';
+}
+
+function handleFile(file){
+  if(!file) return;
+  if(file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')){
+    alert('please choose a PDF file');
+    return;
+  }
+  currentFile = file;
+  resetResult();
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    currentBytes = new Uint8Array(e.target.result);
+    fileName.textContent = file.name;
+    fileSize.textContent = fmtSize(file.size);
+    fileRow.classList.add('show');
+    btnStrip.disabled = !pyodide;
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('drag'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+drop.addEventListener('drop', (e) => {
+  e.preventDefault();
+  drop.classList.remove('drag');
+  handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
+
+btnCheck.addEventListener('click', async () => {
+  if(!currentBytes || !pyodide) return;
+  resetResult();
+  btnCheck.disabled = true;
+  try{
+    pyodide.globals.set('_pdf_bytes', currentBytes);
+    const found = await pyodide.runPythonAsync(`check_metadata(bytes(_pdf_bytes))`);
+    const foundObj = found.toJs({dict_converter: Object.fromEntries});
+    found.destroy();
+    const keys = Object.keys(foundObj);
+    result.classList.add('show');
+    if(keys.length === 0){
+      resultTitle.textContent = 'no metadata found';
+      resultTag.textContent = 'clean';
+      resultTag.classList.remove('dirty');
+      metaList.innerHTML = '<div class="clean">document appears clean -- no /Info or XMP fields detected</div>';
+    } else {
+      resultTitle.textContent = 'metadata found';
+      resultTag.textContent = keys.length + ' field' + (keys.length===1?'':'s');
+      resultTag.classList.add('dirty');
+      metaList.innerHTML = keys.map(k =>
+        `<div class="meta-row"><span class="k">${k}</span><span class="v">${(foundObj[k]||'').toString().slice(0,200)}</span></div>`
+      ).join('');
+    }
+  } catch(err){
+    result.classList.add('show');
+    resultTitle.textContent = 'error';
+    metaList.innerHTML = '<div style="color:var(--bad)">' + err.toString().slice(0,400) + '</div>';
+  } finally {
+    btnCheck.disabled = false;
+  }
+});
+
+btnStrip.addEventListener('click', async () => {
+  if(!currentBytes || !pyodide) return;
+  resetResult();
+  btnStrip.disabled = true;
+  const origLabel = btnStrip.textContent;
+  btnStrip.textContent = 'stripping...';
+  try{
+    pyodide.globals.set('_pdf_bytes', currentBytes);
+    const outBytes = await pyodide.runPythonAsync(`strip_metadata(bytes(_pdf_bytes))`);
+    const jsBytes = outBytes.toJs();
+    outBytes.destroy();
+    const blob = new Blob([jsBytes], {type:'application/pdf'});
+    const url = URL.createObjectURL(blob);
+    const outName = currentFile.name.replace(/\.pdf$/i, '') + '.stripped.pdf';
+
+    result.classList.add('show');
+    resultTitle.textContent = 'stripped';
+    resultTag.textContent = 'done';
+    resultTag.classList.remove('dirty');
+    metaList.innerHTML = '<div class="clean">/Info dictionary and XMP metadata removed.</div>';
+    downloadBar.style.display = 'block';
+    downloadBar.innerHTML = `<a class="dl" href="${url}" download="${outName}">download ${outName}</a>`;
+  } catch(err){
+    result.classList.add('show');
+    resultTitle.textContent = 'error';
+    metaList.innerHTML = '<div style="color:var(--bad)">' + err.toString().slice(0,400) + '</div>';
+  } finally {
+    btnStrip.disabled = false;
+    btnStrip.textContent = origLabel;
+  }
+});
+
+// -- Theme picker ----------------------------------------------------------
+(function(){
+  const THEMES = ['dark','light'];
+  function applyTheme(t){
+    document.documentElement.setAttribute('data-theme', t);
+    document.querySelectorAll('.theme-dot').forEach(d => {
+      d.classList.toggle('active', d.dataset.t === t);
+    });
+    localStorage.setItem('ps-theme', t);
+  }
+  document.querySelectorAll('.theme-dot').forEach(d => {
+    d.addEventListener('click', () => applyTheme(d.dataset.t));
+  });
+  const saved = localStorage.getItem('ps-theme');
+  applyTheme(THEMES.includes(saved) ? saved : 'light');
+})();
+
+// -- View toggle (Ctrl+Shift+S) & reset (Escape) --------------------------
+(function(){
+  let techMode = false;
+
+  function setView(tech){
+    techMode = tech;
+    document.querySelectorAll('.txt-simple').forEach(el => el.hidden = tech);
+    document.querySelectorAll('.txt-tech').forEach(el => el.hidden = !tech);
+  }
+
+  function resetAll(){
+    setView(false);
+    currentFile = null;
+    currentBytes = null;
+    fileRow.classList.remove('show');
+    fileName.textContent = '';
+    fileSize.textContent = '';
+    fileInput.value = '';
+    resetResult();
+    btnStrip.disabled = true;
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if(e.key === 'Escape'){ resetAll(); return; }
+    if(e.ctrlKey && e.shiftKey && e.key === 'S'){ e.preventDefault(); setView(!techMode); }
+  });
+
+  // -- Mobile FAB --------------------------------------------------------
+  const fab = document.getElementById('fab');
+  const fabMenu = document.getElementById('fab-menu');
+
+  fab.addEventListener('click', (e) => {
+    e.stopPropagation();
+    fabMenu.classList.toggle('open');
+  });
+
+  document.getElementById('fab-toggle-view').addEventListener('click', () => {
+    fabMenu.classList.remove('open');
+    setView(!techMode);
+  });
+
+  document.getElementById('fab-reset').addEventListener('click', () => {
+    fabMenu.classList.remove('open');
+    resetAll();
+  });
+
+  document.addEventListener('click', () => fabMenu.classList.remove('open'));
+
+  setView(false);
+})();
+
+boot();
+</script>
+</body>
+</html>

@@ -9,26 +9,25 @@ CYAN   := \033[36m
 YELLOW := \033[33m
 RESET  := \033[0m
 
-DIST_DIR := dist
+DIST_DIR   := dist
+ASSET_DIRS := css js py
 
 PORT            ?= 8008
-HTML_ROOT       := .
-SERVER_URL      := http://localhost:$(PORT)
+SERVER_URL      := http://127.0.0.1:$(PORT)
 SERVER_PID_FILE := .server.pid
+DEFAULT_PAGE    := sanitise-ascii.html
 
-# Each app: "html_file|s3_subpath|index_alias"
-# html_file      - source HTML (also copied as-named)
+# Each app: "html_file:s3_subpath:index_alias"
+# html_file      - source HTML (uploaded under its own name)
 # s3_subpath     - folder under S3_BUCKET
 # index_alias    - y to also upload as index.html, n to skip
 APPS := \
   sanitise-ascii.html:sanitise:y \
   pdf-strip.html:pdfstrip:y
 
-#S3_BUCKET     := s3://find4-webapp
 S3_BUCKET     := s3://alertstack-ai
 S3_OPT_PREFIX := alertstack.ai/apps/
-
-$(shell mkdir -p $(DIST_DIR))
+CACHE_CONTROL := max-age=300
 
 ##@ Help
 
@@ -39,51 +38,56 @@ help: ## Show this help message
 	  /^[a-zA-Z0-9_-]+:.*?##/ { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 }' \
 	  $(MAKEFILE_LIST)
 
-##@ Python / uv
+##@ Setup
 
-.PHONY: venv
-venv: ## Create .venv and install dependencies via uv
-	uv sync
-	@printf "$(GREEN)venv ready$(RESET) -- activate with: source .venv/bin/activate\n"
-
-.PHONY: check-uv
-check-uv: ## Verify uv is available
+.PHONY: install
+install: ## Sync dependencies with uv and enable the commit-msg hook
 	@command -v uv >/dev/null 2>&1 || { printf "$(RED)uv not found$(RESET) -- install from https://docs.astral.sh/uv/\n" >&2; exit 1; }
-	@printf "$(GREEN)uv found$(RESET): $$(uv --version)\n"
+	uv sync
+	git config core.hooksPath .githooks
+	chmod +x .githooks/commit-msg
+	@printf "$(GREEN)ready$(RESET) -- hooks enabled, run 'make check' to verify\n"
+
+##@ Quality
+
+.PHONY: test
+test: ## Run the test suite
+	uv run pytest
+
+.PHONY: lint
+lint: ## Lint, check formatting and type-check
+	uv run ruff check .
+	uv run ruff format --check .
+	uv run mypy py tests
+
+.PHONY: check
+check: lint test ## Lint and test
 
 ##@ Build
 
 .PHONY: release
-release: ## Copy app HTML files to $(DIST_DIR)
-	@printf "$(CYAN)Release to$(RESET) $(DIST_DIR)\n"
-	@ok=0; fail=0; \
-	for entry in $(APPS); do \
-		f=$$(echo "$$entry" | cut -d: -f1); \
-		if /bin/cp $$f $(DIST_DIR)/ 2>/dev/null; then \
-			printf "  $(GREEN)ok$(RESET)  $$f\n"; ok=$$((ok+1)); \
-		else \
-			printf "  $(RED)FAIL$(RESET)  $$f\n"; fail=$$((fail+1)); \
-		fi \
-	done; \
-	printf "\n  $(BOLD)$$ok synced, $$fail failed$(RESET) -> $(DIST_DIR)\n"; \
-	[ $$fail -eq 0 ]
+release: check ## Copy app HTML and shared assets to $(DIST_DIR)
+	@rm -rf $(DIST_DIR) && mkdir -p $(DIST_DIR)
+	@for entry in $(APPS); do cp "$${entry%%:*}" $(DIST_DIR)/ || exit 1; done
+	@cp -R $(ASSET_DIRS) $(DIST_DIR)/
+	@find $(DIST_DIR) -name __pycache__ -prune -exec rm -rf {} +
+	@printf "$(GREEN)released$(RESET) to $(DIST_DIR)/\n"
 
 ##@ Deploy
 
 .PHONY: deploy
-deploy: ## Deploy all apps to S3 (set S3_OPT_PREFIX=staging/ for non-prod)
+deploy: release ## Deploy all apps to S3 (set S3_OPT_PREFIX=staging/ for non-prod)
 	@for entry in $(APPS); do \
-		f=$$(echo "$$entry" | cut -d: -f1); \
-		sub=$$(echo "$$entry" | cut -d: -f2); \
-		alias=$$(echo "$$entry" | cut -d: -f3); \
-		dest=$(S3_BUCKET)/$(S3_OPT_PREFIX)$$sub/$$f; \
-		printf "$(CYAN)upload$(RESET)  $$f -> $$dest\n"; \
-		aws s3 cp $$f $$dest; \
+		IFS=: read -r f sub alias <<< "$$entry"; \
+		dest=$(S3_BUCKET)/$(S3_OPT_PREFIX)$$sub; \
+		printf "$(CYAN)upload$(RESET)  $$f -> $$dest/\n"; \
+		aws s3 cp --cache-control "$(CACHE_CONTROL)" $(DIST_DIR)/$$f $$dest/$$f || exit 1; \
 		if [ "$$alias" = "y" ]; then \
-			idest=$(S3_BUCKET)/$(S3_OPT_PREFIX)$$sub/index.html; \
-			printf "$(CYAN)alias $(RESET)  $$f -> $$idest\n"; \
-			aws s3 cp $$f $$idest; \
-		fi \
+			aws s3 cp --cache-control "$(CACHE_CONTROL)" $(DIST_DIR)/$$f $$dest/index.html || exit 1; \
+		fi; \
+		for d in $(ASSET_DIRS); do \
+			aws s3 sync --delete --cache-control "$(CACHE_CONTROL)" $(DIST_DIR)/$$d $$dest/$$d || exit 1; \
+		done; \
 	done
 
 ##@ Local Server
@@ -93,21 +97,16 @@ start: ## Start HTTP server in background (PORT=8008)
 	@if [ -f "$(SERVER_PID_FILE)" ] && kill -0 $$(cat $(SERVER_PID_FILE)) 2>/dev/null; then \
 		printf "$(YELLOW)[start]$(RESET) Server already running (pid $$(cat $(SERVER_PID_FILE)))\n"; \
 	else \
-		python3 -c "import http.server, os; os.chdir('$(HTML_ROOT)'); \
-			httpd = http.server.HTTPServer(('0.0.0.0', $(PORT)), http.server.SimpleHTTPRequestHandler); \
-			print('Serving HTTP on $(SERVER_URL)'); httpd.serve_forever()" \
-			>/dev/null 2>&1 & \
+		python3 -m http.server $(PORT) --bind 127.0.0.1 >/dev/null 2>&1 & \
 		echo $$! > $(SERVER_PID_FILE); \
-		ln -sf sanitise-ascii.html index.html; \
 		printf "$(GREEN)[start]$(RESET) Server started on $(SERVER_URL) (pid $$(cat $(SERVER_PID_FILE)))\n"; \
 	fi
 
 .PHONY: stop
 stop: ## Stop the background HTTP server
 	@if [ -f "$(SERVER_PID_FILE)" ] && kill -0 $$(cat $(SERVER_PID_FILE)) 2>/dev/null; then \
-		kill $$(cat $(SERVER_PID_FILE)) && rm -f $(SERVER_PID_FILE); \
-		kill $$(lsof -ti :$(PORT)) 2>/dev/null || true; \
-		rm -f index.html; \
+		kill $$(cat $(SERVER_PID_FILE)); \
+		rm -f $(SERVER_PID_FILE); \
 		printf "$(GREEN)[stop]$(RESET) Server stopped\n"; \
 	else \
 		rm -f $(SERVER_PID_FILE); \
@@ -116,9 +115,8 @@ stop: ## Stop the background HTTP server
 
 .PHONY: serve
 serve: start ## Start server and open in browser
-	@CB=$$(date +%s); \
-	URL="$(SERVER_URL)/index.html?v=$$CB"; \
+	@URL="$(SERVER_URL)/$(DEFAULT_PAGE)?v=$$(date +%s)"; \
 	printf "$(CYAN)[serve]$(RESET) Opening $$URL...\n"; \
-	if command -v open &>/dev/null; then open "$$URL"; \
-	elif command -v xdg-open &>/dev/null; then xdg-open "$$URL"; \
+	if command -v open >/dev/null 2>&1; then open "$$URL"; \
+	elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$$URL"; \
 	else printf "$(YELLOW)Open manually:$(RESET) $$URL\n"; fi

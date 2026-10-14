@@ -1,0 +1,22 @@
+#!/bin/sh
+# Enforce Conventional Commits: <type>[optional scope][!]: <description>
+
+subject=$(head -n 1 "$1")
+pattern='^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\([^)]+\))?!?: .+'
+
+case "$subject" in
+    Merge\ *|Revert\ \"*|fixup!\ *|squash!\ *) exit 0 ;;
+esac
+
+if ! printf '%s\n' "$subject" | grep -Eq "$pattern"; then
+    cat >&2 <<MSG
+Commit message rejected: subject does not follow Conventional Commits.
+
+  Expected: <type>[optional scope]: <description>
+  Types:    feat, fix, docs, style, refactor, perf, test, chore, ci, build, revert
+  Example:  fix(pdf-strip): drop orphaned XMP streams
+
+  Got:      $subject
+MSG
+    exit 1
+fi
